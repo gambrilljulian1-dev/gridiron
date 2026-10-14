@@ -1,0 +1,106 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function leagueExists(leagueId) { return exists(/databases/$(database)/documents/leagues/$(leagueId)); }
+    function isMember(leagueId) {
+      return signedIn() && exists(/databases/$(database)/documents/leagues/$(leagueId)/members/$(request.auth.uid));
+    }
+    function isCommissioner(leagueId) {
+      return signedIn() && get(/databases/$(database)/documents/leagues/$(leagueId)).data.commissionerUid == request.auth.uid;
+    }
+
+    match /users/{uid} {
+      allow create: if isSelf(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.keys().hasOnly(['uid','firstName','lastName','email','searchFirst','createdAt']);
+      allow get, list: if signedIn();
+      allow update: if isSelf(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['firstName','lastName','searchFirst']);
+      allow delete: if false;
+      match /leagues/{leagueId} {
+        allow read: if isSelf(uid);
+        allow create: if isSelf(uid) && leagueExists(leagueId)
+          && get(/databases/$(database)/documents/leagues/$(leagueId)).data.commissionerUid == uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // Invite codes are lookup-only. The actual league remains readable only to members.
+    match /inviteCodes/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['leagueId'])
+        && exists(/databases/$(database)/documents/leagues/$(request.resource.data.leagueId))
+        && get(/databases/$(database)/documents/leagues/$(request.resource.data.leagueId)).data.commissionerUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /leagues/{leagueId} {
+      allow create: if signedIn()
+        && request.resource.data.commissionerUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['name','commissionerUid','inviteCode','rosterSize','status','createdAt','currentWeek']);
+      allow get: if isMember(leagueId);
+      allow list: if false;
+      allow update: if isCommissioner(leagueId)
+        && request.resource.data.commissionerUid == resource.data.commissionerUid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','rosterSize','status','currentWeek','draftStartedAt']);
+      allow delete: if false;
+
+      match /members/{uid} {
+        allow read: if isMember(leagueId);
+        allow create: if isSelf(uid) && leagueExists(leagueId)
+          && request.resource.data.uid == uid
+          && request.resource.data.keys().hasOnly(['uid','firstName','lastName','email','searchFirst','createdAt','teamName','ready','draftOrder','joinedAt','inviteCode'])
+          && (get(/databases/$(database)/documents/leagues/$(leagueId)).data.commissionerUid == uid
+            || (request.resource.data.inviteCode is string
+              && get(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode)).data.leagueId == leagueId));
+        allow update: if isSelf(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ready','teamName']);
+        allow delete: if isCommissioner(leagueId) && uid != request.auth.uid;
+      }
+
+      match /players/{playerId} {
+        allow read: if isMember(leagueId);
+        allow create: if isCommissioner(leagueId)
+          && request.resource.data.keys().hasOnly(['firstName','lastName','fullName','points','ownerUid','createdAt'])
+          && request.resource.data.firstName is string
+          && request.resource.data.lastName is string
+          && request.resource.data.points == 0
+          && request.resource.data.ownerUid == null;
+        allow update: if isMember(leagueId) && (
+          (isCommissioner(leagueId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['firstName','lastName','fullName','points','ownerUid','ownerName','draftedAt'])
+            && request.resource.data.points is number && request.resource.data.points >= 0)
+          || (!isCommissioner(leagueId)
+            && resource.data.ownerUid == null
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerUid','ownerName','draftedAt'])
+            && request.resource.data.ownerUid == request.auth.uid)
+        );
+        allow delete: if isCommissioner(leagueId) && resource.data.ownerUid == null;
+      }
+
+      match /matchups/{matchupId} {
+        allow read: if isMember(leagueId);
+        allow create: if isCommissioner(leagueId)
+          && request.resource.data.keys().hasOnly(['week','homeUid','awayUid','homeScore','awayScore','gamesPlayed','gameScores','status','startAt','homeName','awayName','createdAt'])
+          && request.resource.data.homeUid != request.resource.data.awayUid
+          && request.resource.data.gamesPlayed == 0;
+        allow update: if isCommissioner(leagueId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['week','homeUid','awayUid','homeScore','awayScore','gamesPlayed','gameScores','status','startAt','homeName','awayName','completedAt','winnerUid'])
+          && request.resource.data.gamesPlayed >= 0 && request.resource.data.gamesPlayed <= 3
+          && request.resource.data.homeScore is number && request.resource.data.awayScore is number;
+        allow delete: if isCommissioner(leagueId);
+      }
+
+      match /invites/{uid} {
+        allow read: if isMember(leagueId);
+        allow create: if isMember(leagueId) && request.resource.data.invitedBy == request.auth.uid
+          && request.resource.data.keys().hasOnly(['uid','invitedBy','createdAt','status']);
+        allow update, delete: if isCommissioner(leagueId);
+      }
+    }
+  }
+}
